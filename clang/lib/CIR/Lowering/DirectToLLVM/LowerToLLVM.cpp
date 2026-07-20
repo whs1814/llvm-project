@@ -216,8 +216,28 @@ mlir::LogicalResult CIRToLLVMCopyOpLowering::matchAndRewrite(
       rewriter, op.getLoc(), rewriter.getI64Type(),
       op.getCopySizeInBytes(layout));
   assert(!cir::MissingFeatures::aggValueSlotVolatile());
+
+  uint64_t dstTypeAlign = dataLayout.getTypeABIAlignment(convertTypeForMemory(
+      *getTypeConverter(), dataLayout, op.getDst().getType().getPointee()));
+  uint64_t srcTypeAlign = dataLayout.getTypeABIAlignment(convertTypeForMemory(
+      *getTypeConverter(), dataLayout, op.getSrc().getType().getPointee()));
+
+  mlir::NamedAttribute dstAlignAttr = rewriter.getNamedAttr(
+      mlir::LLVM::LLVMDialect::getAlignAttrName(),
+      rewriter.getI64IntegerAttr(op.getDstAlignment().value_or(dstTypeAlign)));
+  mlir::NamedAttribute srcAlignAttr = rewriter.getNamedAttr(
+      mlir::LLVM::LLVMDialect::getAlignAttrName(),
+      rewriter.getI64IntegerAttr(op.getSrcAlignment().value_or(srcTypeAlign)));
+  mlir::ArrayAttr argAttrs = rewriter.getArrayAttr({
+      /*dst_attrs=*/rewriter.getDictionaryAttr({dstAlignAttr}),
+      /*src_attrs=*/rewriter.getDictionaryAttr({srcAlignAttr}),
+  });
+
   rewriter.replaceOpWithNewOp<mlir::LLVM::MemcpyOp>(
-      op, adaptor.getDst(), adaptor.getSrc(), length, op.getIsVolatile());
+      op, adaptor.getDst(), adaptor.getSrc(), length, op.getIsVolatile(),
+      /*access_groups=*/nullptr, /*alias_scopes=*/nullptr,
+      /*noalias_scopes=*/nullptr, /*tbaa=*/nullptr, /*arg_attrs=*/argAttrs,
+      /*res_attrs=*/nullptr);
   return mlir::success();
 }
 
@@ -2006,6 +2026,8 @@ mlir::LogicalResult CIRToLLVMLoadOpLowering::matchAndRewrite(
       op.getIsVolatile(), /*isNonTemporal=*/op.getIsNontemporal(),
       /*isInvariant=*/op.getInvariant(), /*isInvariantGroup=*/false, ordering,
       llvmSyncScope.value_or(std::string()));
+  if (mlir::Attribute domain = op->getAttr("cir.riscv_nontemporal_domain"))
+    newLoad->setAttr("cir.riscv_nontemporal_domain", domain);
 
   // Convert adapted result to its original type if needed.
   mlir::Value result =
@@ -2061,6 +2083,8 @@ mlir::LogicalResult CIRToLLVMStoreOpLowering::matchAndRewrite(
       op.getIsVolatile(),
       /*isNonTemporal=*/op.getIsNontemporal(), /*isInvariantGroup=*/false,
       memorder, llvmSyncScope.value_or(std::string()));
+  if (mlir::Attribute domain = op->getAttr("cir.riscv_nontemporal_domain"))
+    storeOp->setAttr("cir.riscv_nontemporal_domain", domain);
   rewriter.replaceOp(op, storeOp);
   assert(!cir::MissingFeatures::opLoadStoreTbaa());
   return mlir::LogicalResult::success();
